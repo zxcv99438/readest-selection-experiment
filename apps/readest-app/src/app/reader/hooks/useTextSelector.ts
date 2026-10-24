@@ -19,7 +19,7 @@ import {
   TextSelection,
   trimRangeWhitespaceAroundPoint,
 } from '@/utils/sel';
-import { Corner, useAutoPageTurn } from './useAutoPageTurn';
+import { Corner, getReadingAreaRect, useAutoPageTurn } from './useAutoPageTurn';
 import { useInstantAnnotation } from './useInstantAnnotation';
 import {
   applyCrossDocSegments,
@@ -128,6 +128,21 @@ export const useTextSelector = (
   // the finger position the Android hyphen repair rebuilds from.
   const pointerPos = useRef<{ x: number; y: number } | null>(null);
   const mouseDoubleClickRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+  const mouseDragOrigin = useRef<Point | null>(null);
+  const mouseDragFrame = useRef<number | null>(null);
+  const pendingMouseMove = useRef<{ doc: Document; x: number; y: number } | null>(null);
+  const mouseSelectionChanged = useRef(false);
+  const mouseCaretCorner = useRef<Corner | null>(null);
+  const mouseReadingArea = useRef<DOMRect | null>(null);
+
+  const cancelMouseDragFrame = () => {
+    if (mouseDragFrame.current !== null) cancelAnimationFrame(mouseDragFrame.current);
+    mouseDragFrame.current = null;
+    pendingMouseMove.current = null;
+    mouseSelectionChanged.current = false;
+    mouseCaretCorner.current = null;
+    mouseReadingArea.current = null;
+  };
 
   // Android hyphen selection-bounds bug (#1553): the selection anchor captured
   // at the first selectionchange of a touch gesture, plus whether that initial
@@ -584,6 +599,8 @@ export const useTextSelector = (
   // corner turn (with the edge mark it drew). Leaving the latches set let a
   // later move with no drag of its own inherit them and turn the page.
   const endSelectionDrag = () => {
+    cancelMouseDragFrame();
+    mouseDragOrigin.current = null;
     pointerDragActive.current = false;
     selectionDragging.current = false;
     dragOriginRef.current = null;
@@ -591,7 +608,9 @@ export const useTextSelector = (
   };
 
   const handlePointerDown = (doc: Document, index: number, ev: PointerEvent) => {
+    cancelMouseDragFrame();
     beginSelectionDrag();
+    mouseDragOrigin.current = ev.pointerType === 'mouse' ? { x: ev.clientX, y: ev.clientY } : null;
     lastPointerType.current = ev.pointerType;
     isPointerDown.current = true;
     clearCrossDoc();
@@ -636,6 +655,44 @@ export const useTextSelector = (
         : null;
   };
 
+  const scheduleMouseDragFrame = () => {
+    if (mouseDragFrame.current !== null || !pendingMouseMove.current) return;
+    mouseDragFrame.current = requestAnimationFrame(() => {
+      mouseDragFrame.current = null;
+      const sample = pendingMouseMove.current;
+      if (!sample || getViewSettings(bookKey)?.scrolled) return;
+      const sel = sample.doc.getSelection();
+      if (!sel?.rangeCount || sel.isCollapsed) {
+        mouseCaretCorner.current = null;
+        mouseSelectionChanged.current = false;
+        cancelAutoTurn();
+        return;
+      }
+      const frame = sample.doc.defaultView?.frameElement?.getBoundingClientRect();
+      pointerPos.current = {
+        x: sample.x + (frame?.left ?? 0),
+        y: sample.y + (frame?.top ?? 0),
+      };
+      if (!mouseDragOrigin.current) pointerDragActive.current = noteDragTravel();
+      if (!pointerDragActive.current || !selectionDragging.current) return;
+      // The reader viewport is stable during one drag. Resize and page turns
+      // invalidate it. Pointer motion alone does not move the selection caret,
+      // so remeasure the caret only after selectionchange, not on every frame.
+      const area = (mouseReadingArea.current ??= getReadingAreaRect(bookKey, contentInsets));
+      if (mouseSelectionChanged.current) {
+        mouseSelectionChanged.current = false;
+        mouseCaretCorner.current = caretCornerNow(sample.doc, true, area);
+      }
+      const corner = cornerAtPoint(pointerPos.current, false, area) ?? mouseCaretCorner.current;
+      noteCorner(
+        corner,
+        (c) =>
+          (pointerDragActive.current && cornerAtPoint(pointerPos.current, false, area) === c) ||
+          caretCornerNow(sample.doc, true, area) === c,
+      );
+    });
+  };
+
   const handlePointerMove = (doc: Document, index: number, ev: PointerEvent) => {
     const doubleClick = mouseDoubleClickRef.current;
     if (
@@ -645,6 +702,27 @@ export const useTextSelector = (
         DOUBLE_CLICK_DRAG_MOVE_PX
     ) {
       doubleClick.moved = true;
+    }
+    // Ordinary mouse drags are painted by the browser's native Selection. Scroll
+    // mode needs no application work until release. In paginated mode only the
+    // corner-turn affordance needs geometry, at most once per painted frame.
+    // Keep instant highlights and fixed-layout cross-document drags synchronous.
+    if (ev.pointerType === 'mouse' && !isInstantAnnotating.current && !dragAnchorRef.current) {
+      if (!(ev.buttons & 1)) {
+        pointerDragActive.current = false;
+        cancelMouseDragFrame();
+        cancelAutoTurn();
+        return;
+      }
+      if (getViewSettings(bookKey)?.scrolled) return;
+      const origin = mouseDragOrigin.current;
+      if (origin) {
+        pointerDragActive.current =
+          Math.hypot(ev.clientX - origin.x, ev.clientY - origin.y) > SELECTION_DRAG_SLOP_PX;
+      }
+      pendingMouseMove.current = { doc, x: ev.clientX, y: ev.clientY };
+      scheduleMouseDragFrame();
+      return;
     }
     // The listener lives on the book iframe's document, so ev.clientX/Y are in
     // the (very wide, multi-column) iframe viewport. Map to window coordinates
@@ -1002,10 +1080,16 @@ export const useTextSelector = (
   // in, reading a finger dragged off the page as the edge it left by.
   const pointerCornerNow = (): Corner | null => cornerAtPoint(pointerPos.current, true);
   // The corner the selection caret (focus) is in.
-  const caretCornerNow = (doc: Document): Corner | null => {
+  const caretCornerNow = (
+    doc: Document,
+    nativeMouseDrag = false,
+    area?: DOMRect | null,
+  ): Corner | null => {
     const sel = doc.getSelection();
-    if (!sel || !isValidSelection(sel)) return null;
-    return cornerAtPoint(focusCaretWindowPos(doc, sel));
+    if (!sel || (nativeMouseDrag ? !sel.rangeCount || sel.isCollapsed : !isValidSelection(sel))) {
+      return null;
+    }
+    return cornerAtPoint(focusCaretWindowPos(doc, sel), false, area);
   };
   // Whether any input signal (pointer/touch or caret) is currently in corner `c`.
   // Injected into the dwell machine as the native-selection liveness predicate so
@@ -1027,6 +1111,20 @@ export const useTextSelector = (
     const isTouchInput = lastPointerType.current === 'touch' || lastPointerType.current === 'pen';
     const sel = doc.getSelection() as Selection;
     const viewSettings = getViewSettings(bookKey);
+
+    // Do not serialize the complete selection or force caret layout on every
+    // native mouse update. The pointer frame above maintains page-edge turning;
+    // pointerup still extracts the final text/CFI for Copy and the toolbar.
+    if (!isAndroid && !isTouchInput && isPointerDown.current) {
+      if (sel?.rangeCount && !sel.isCollapsed && pointerDragActive.current) {
+        selectionDragging.current = true;
+      }
+      if (!viewSettings?.scrolled) {
+        mouseSelectionChanged.current = true;
+        scheduleMouseDragFrame();
+      }
+      return;
+    }
 
     // Only a selection that moves while a pointer is dragging arms the turn: the
     // long-press that creates one must not, or a finger that then rests at the
@@ -1060,7 +1158,6 @@ export const useTextSelector = (
     // Desktop mouse selections defer to pointerup, but a keyboard selection
     // adjustment (#4728) has no pointerup — process it as long as a pointer drag
     // isn't in progress (mid-drag still defers to pointerup).
-    if (!isAndroid && !isTouchInput && isPointerDown.current) return;
     // Touch drags in paginated mode (iOS/web): the system handle drag streams
     // selectionchange while the Annotator's touchmove handler hides the popup;
     // processing each change re-showed it and made the toolbar flash. Defer to
@@ -1159,13 +1256,21 @@ export const useTextSelector = (
     // page we landed on (the #873 pin in handleScroll). Harmless when nothing is
     // pinned (instant highlight / range editors carry no DOM selection).
     const unsubAfterTurn = onAfterTurn(() => {
+      mouseReadingArea.current = null;
+      mouseCaretCorner.current = null;
       selectionPosition.current =
         getView(bookKey)?.renderer?.containerPosition ?? selectionPosition.current;
     });
+    const invalidateMouseReadingArea = () => {
+      mouseReadingArea.current = null;
+    };
+    window.addEventListener('resize', invalidateMouseReadingArea);
     return () => {
       eventDispatcher.offSync('iframe-single-click', handleSingleClick);
       unsubAfterTurn();
+      window.removeEventListener('resize', invalidateMouseReadingArea);
       if (instantHoldTimer.current) clearTimeout(instantHoldTimer.current);
+      cancelMouseDragFrame();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

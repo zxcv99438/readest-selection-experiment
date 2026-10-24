@@ -1,3 +1,5 @@
+> **Unofficial Windows selection experiment.** Based on Readest v0.12.8; see [EXPERIMENT.md](EXPERIMENT.md) for changes, limitations, attribution and build instructions. No public executable is included at this preparation stage.
+
 <div align="center">
   <a href="https://readest.com?utm_source=github&utm_medium=referral&utm_campaign=readme" target="_blank">
     <img src="https://github.com/readest/readest/blob/main/apps/readest-app/src-tauri/icons/icon.png?raw=true" alt="Readest Logo" width="20%" />

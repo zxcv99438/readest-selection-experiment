@@ -168,9 +168,19 @@ export const useAutoPageTurn = (bookKey: string, contentInsets: Insets = ZERO_IN
 
   const readingAreaRect = (): DOMRect | null => getReadingAreaRect(bookKey, contentInsets);
 
-  const cornerAtPoint = (point: Point | null, beyond = false): Corner | null =>
+  const cornerAtPoint = (
+    point: Point | null,
+    beyond = false,
+    area?: DOMRect | null,
+  ): Corner | null =>
     point
-      ? cornerAt(point.x, point.y, readingAreaRect(), beyond, !!getViewSettings(bookKey)?.rtl)
+      ? cornerAt(
+          point.x,
+          point.y,
+          area === undefined ? readingAreaRect() : area,
+          beyond,
+          !!getViewSettings(bookKey)?.rtl,
+        )
       : null;
 
   const clearTimer = () => {

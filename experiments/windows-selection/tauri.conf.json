@@ -1,0 +1,9 @@
+{
+  "productName": "Readest Selection Experiment",
+  "mainBinaryName": "readest-selection-experiment",
+  "identifier": "io.github.zxcv99438.readestselectionexperiment",
+  "version": "0.12.8-selection.exp.1",
+  "build": { "beforeBuildCommand": "", "frontendDist": "../out" },
+  "bundle": { "active": false, "resources": {} },
+  "plugins": { "deep-link": { "desktop": { "schemes": [] } } }
+}
